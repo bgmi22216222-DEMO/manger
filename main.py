@@ -93,7 +93,11 @@ _SB_HEADERS = {
     "Content-Type": "application/json",
     "Prefer": "return=minimal",
 }
-_SB_TABLE = f"{SUPABASE_URL}/rest/v1/bot_config"
+# Strip any trailing /rest/v1 from SUPABASE_URL to avoid duplication
+_SB_BASE = SUPABASE_URL.rstrip("/")
+if _SB_BASE.endswith("/rest/v1"):
+    _SB_BASE = _SB_BASE[: -len("/rest/v1")]
+_SB_TABLE = f"{_SB_BASE}/rest/v1/bot_config"
 _SESSION_KEY = "telegram_string_session"
 
 
