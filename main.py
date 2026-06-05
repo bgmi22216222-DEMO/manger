@@ -366,8 +366,14 @@ def register_bot_handlers() -> None:
                 result = await login_userbot.send_code_request(phone)
                 state["phone_code_hash"] = result.phone_code_hash
                 state["step"] = "await_otp"
+                state["otp_requested_at"] = asyncio.get_event_loop().time()
+
                 await event.respond(
-                    "📟 **Login Step 2/3**\n\nAn OTP has been sent to your Telegram.\nSend the 5-digit code:"
+                    "📟 **Login Step 2/3**\n\n"
+                    "OTP aapke Telegram par bheja gaya hai.\n\n"
+                    "⚠️ **OTP sirf ~60 seconds valid hai — turant bhejo!**\n\n"
+                    "Code bhejo (spaces hata ke): e.g. `12345`\n"
+                    "Ya space ke saath bhi chalega: `1 2 3 4 5`"
                 )
             except errors.PhoneNumberInvalidError:
                 await event.respond("❌ Phone number is invalid. Restart with `/login`.")
@@ -378,9 +384,28 @@ def register_bot_handlers() -> None:
 
         # ── STEP B: Receive OTP ───────────────────────────────────────────
         elif step == "await_otp":
-            otp = event.message.message.strip()
+            # Strip spaces so "1 2 3 4 5" → "12345"
+            otp = event.message.message.strip().replace(" ", "")
             phone = state["phone"]
             code_hash = state["phone_code_hash"]
+
+            # Auto re-request if OTP is likely expired (>55 seconds old)
+            otp_age = asyncio.get_event_loop().time() - state.get("otp_requested_at", 0)
+            if otp_age > 55:
+                try:
+                    result = await login_userbot.send_code_request(phone)
+                    state["phone_code_hash"] = result.phone_code_hash
+                    state["otp_requested_at"] = asyncio.get_event_loop().time()
+                    await event.respond(
+                        "⏰ **OTP expire ho gaya tha!**\n\n"
+                        "Naya OTP bheja gaya hai aapke Telegram par.\n"
+                        "Ab **30 seconds ke andar** woh code yahan bhejo!"
+                    )
+                    return
+                except Exception as exc:
+                    await event.respond(f"❌ OTP re-request failed: `{exc}`\nRestart with `/login`.")
+                    login_state.pop(uid, None)
+                    return
 
             try:
                 await login_userbot.sign_in(phone, otp, phone_code_hash=code_hash)
@@ -393,10 +418,20 @@ def register_bot_handlers() -> None:
                     "🔐 **Login Step 3/3 — 2FA Required**\n\nEnter your Two-Factor Authentication cloud password:"
                 )
             except errors.PhoneCodeInvalidError:
-                await event.respond("❌ Wrong OTP. Send the correct 5-digit code:")
+                await event.respond("❌ Wrong OTP. Send the correct 5-digit code (spaces mat dalo):")
             except errors.PhoneCodeExpiredError:
-                await event.respond("❌ OTP expired. Restart with `/login`.")
-                login_state.pop(uid, None)
+                # OTP expired mid-flow — auto re-request
+                try:
+                    result = await login_userbot.send_code_request(phone)
+                    state["phone_code_hash"] = result.phone_code_hash
+                    state["otp_requested_at"] = asyncio.get_event_loop().time()
+                    await event.respond(
+                        "⏰ **OTP expire hua — naya OTP bheja gaya!**\n\n"
+                        "Apne Telegram par naya code dekho aur **turant** bhejo!"
+                    )
+                except Exception as exc2:
+                    await event.respond(f"❌ OTP expired aur re-request bhi fail: `{exc2}`\nRestart with `/login`.")
+                    login_state.pop(uid, None)
             except Exception as exc:
                 await event.respond(f"❌ sign_in error: `{exc}`\nRestart with `/login`.")
                 login_state.pop(uid, None)
