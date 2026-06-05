@@ -393,24 +393,6 @@ def register_bot_handlers() -> None:
             phone = state["phone"]
             code_hash = state["phone_code_hash"]
 
-            # Auto re-request if OTP is likely expired (>55 seconds old)
-            otp_age = asyncio.get_event_loop().time() - state.get("otp_requested_at", 0)
-            if otp_age > 55:
-                try:
-                    result = await login_userbot.send_code_request(phone)
-                    state["phone_code_hash"] = result.phone_code_hash
-                    state["otp_requested_at"] = asyncio.get_event_loop().time()
-                    await event.respond(
-                        "⏰ **OTP expire ho gaya tha!**\n\n"
-                        "Naya OTP bheja gaya hai aapke Telegram par.\n"
-                        "Ab **30 seconds ke andar** woh code yahan bhejo!"
-                    )
-                    return
-                except Exception as exc:
-                    await event.respond(f"❌ OTP re-request failed: `{exc}`\nRestart with `/login`.")
-                    login_state.pop(uid, None)
-                    return
-
             try:
                 await login_userbot.sign_in(phone, otp, phone_code_hash=code_hash)
                 # OTP success — no 2FA needed
