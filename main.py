@@ -287,6 +287,8 @@ async def safe_send(
 
 def admin_only(handler):
     """Decorator: silently ignore messages from non-admins."""
+    import functools
+    @functools.wraps(handler)
     async def wrapper(event):
         if event.sender_id not in ADMIN_IDS:
             return
@@ -339,8 +341,10 @@ def register_bot_handlers() -> None:
 
     # ── Generic message handler — drives the login state machine ─────────────
     @bot_client.on(events.NewMessage)
-    @admin_only
     async def on_message(event):
+        # Admin check inline (decorator causes Telethon registration issues)
+        if event.sender_id not in ADMIN_IDS:
+            return
         # Ignore commands — handled above
         if event.message.message.startswith("/"):
             return
