@@ -210,19 +210,58 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
         else:
             return
 
-        # Keyword check — sirf tab forward karo jab caption me keyword ho
-        caption = (msg.message or "").lower()
-        if keyword not in caption:
-            log.info("%s converter reply skipped — keyword '%s' not found in caption.", label, keyword)
+        # ── Media check: photo ya video hona chahiye ──────────────────────────
+        has_photo = bool(msg.photo)
+        has_video = (
+            msg.document is not None
+            and msg.document.mime_type is not None
+            and (
+                msg.document.mime_type.startswith("video/")
+                or msg.document.mime_type.startswith("image/")
+            )
+        )
+        if not has_photo and not has_video:
+            log.info("%s converter reply skipped — no media.", label)
             return
 
-        log.info("%s converter replied — sending to @%s", label, dest)
+        # ── Link check: keyword must appear inside a URL in the message ───────
+        all_urls = []
 
-        # Phase 3 — Fresh send (no forward tag) to destination bot
+        # 1. Text entities (MessageEntityUrl → raw text, MessageEntityTextUrl → .url attr)
+        if msg.entities:
+            for ent in msg.entities:
+                url_attr = getattr(ent, "url", None)
+                if url_attr:
+                    all_urls.append(url_attr.lower())
+                else:
+                    raw_text = msg.message or ""
+                    chunk = raw_text[ent.offset: ent.offset + ent.length]
+                    if chunk.lower().startswith("http"):
+                        all_urls.append(chunk.lower())
+
+        # 2. Inline keyboard button URLs
+        if msg.reply_markup:
+            for row in getattr(msg.reply_markup, "rows", []):
+                for btn in getattr(row, "buttons", []):
+                    btn_url = getattr(btn, "url", None)
+                    if btn_url:
+                        all_urls.append(btn_url.lower())
+
+        keyword_found = any(keyword in url for url in all_urls)
+        if not keyword_found:
+            log.info(
+                "%s converter reply skipped — keyword '%s' not found in any link. URLs found: %s",
+                label, keyword, all_urls,
+            )
+            return
+
+        log.info("%s converter replied — keyword '%s' found in link, sending to @%s", label, keyword, dest)
+
+        # Phase 3 — Fresh send (no forward tag) to destination
         await safe_send(
             ub,
             dest,
-            file=msg.media if msg.media else None,
+            file=msg.media,
             message=msg.message or "",
         )
 
