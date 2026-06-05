@@ -225,7 +225,9 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
             return
 
         # ── Link check: keyword must appear inside a URL in the message ───────
+        import re as _re
         all_urls = []
+        raw_text = (msg.message or "").lower()
 
         # 1. Text entities (MessageEntityUrl → raw text, MessageEntityTextUrl → .url attr)
         if msg.entities:
@@ -234,10 +236,9 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
                 if url_attr:
                     all_urls.append(url_attr.lower())
                 else:
-                    raw_text = msg.message or ""
                     chunk = raw_text[ent.offset: ent.offset + ent.length]
-                    if chunk.lower().startswith("http"):
-                        all_urls.append(chunk.lower())
+                    if chunk.startswith("http"):
+                        all_urls.append(chunk)
 
         # 2. Inline keyboard button URLs
         if msg.reply_markup:
@@ -246,6 +247,13 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
                     btn_url = getattr(btn, "url", None)
                     if btn_url:
                         all_urls.append(btn_url.lower())
+
+        # 3. Regex fallback — plain text me bhi URLs scan karo (entities na ho tab bhi)
+        regex_urls = _re.findall(r"https?://\S+", raw_text)
+        all_urls.extend(regex_urls)
+
+        # Deduplicate
+        all_urls = list(set(all_urls))
 
         keyword_found = any(keyword in url for url in all_urls)
         if not keyword_found:
