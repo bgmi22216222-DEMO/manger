@@ -202,10 +202,18 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
         if sender_username == TERA_CONVERTER_BOT:
             dest = TERA_DESTINATION
             label = "Tera"
+            keyword = "tera"
         elif sender_username == DISK_CONVERTER_BOT:
             dest = DISK_DESTINATION
             label = "Disk"
+            keyword = "disk"
         else:
+            return
+
+        # Keyword check — sirf tab forward karo jab caption me keyword ho
+        caption = (msg.message or "").lower()
+        if keyword not in caption:
+            log.info("%s converter reply skipped — keyword '%s' not found in caption.", label, keyword)
             return
 
         log.info("%s converter replied — sending to @%s", label, dest)
