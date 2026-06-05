@@ -393,24 +393,28 @@ def register_bot_handlers() -> None:
             phone = state["phone"]
             code_hash = state["phone_code_hash"]
 
+            log.info("OTP attempt: phone=%s otp_len=%d otp_val=%s hash=%s", phone, len(otp), otp, code_hash[:8])
+
             try:
                 await login_userbot.sign_in(phone, otp, phone_code_hash=code_hash)
+                log.info("sign_in succeeded for %s", phone)
                 # OTP success — no 2FA needed
                 await _finalize_login(event, uid)
 
             except errors.SessionPasswordNeededError:
+                log.info("2FA required for %s", phone)
                 state["step"] = "await_2fa"
                 await event.respond(
                     "🔐 **Login Step 3/3 — 2FA Required**\n\nEnter your Two-Factor Authentication cloud password:"
                 )
-            except errors.PhoneCodeInvalidError:
-                await event.respond("❌ Wrong OTP. Send the correct 5-digit code (spaces mat dalo):")
-            except errors.PhoneCodeExpiredError:
-                # OTP expired mid-flow — auto re-request
+            except errors.PhoneCodeInvalidError as exc:
+                log.warning("PhoneCodeInvalid: %s", exc)
+                await event.respond("❌ Wrong OTP. Send the correct 5-digit code:")
+            except errors.PhoneCodeExpiredError as exc:
+                log.warning("PhoneCodeExpired: %s", exc)
                 try:
                     result = await login_userbot.send_code_request(phone)
                     state["phone_code_hash"] = result.phone_code_hash
-                    state["otp_requested_at"] = asyncio.get_event_loop().time()
                     await event.respond(
                         "⏰ **OTP expire hua — naya OTP bheja gaya!**\n\n"
                         "Apne Telegram par naya code dekho aur **turant** bhejo!"
@@ -419,6 +423,7 @@ def register_bot_handlers() -> None:
                     await event.respond(f"❌ OTP expired aur re-request bhi fail: `{exc2}`\nRestart with `/login`.")
                     login_state.pop(uid, None)
             except Exception as exc:
+                log.exception("sign_in unexpected error: %s", exc)
                 await event.respond(f"❌ sign_in error: `{exc}`\nRestart with `/login`.")
                 login_state.pop(uid, None)
 
