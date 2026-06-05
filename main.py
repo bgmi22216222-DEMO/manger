@@ -78,6 +78,12 @@ DISK_DESTINATION    = _clean_username(_require("DISK_DESTINATION"))
 
 ALL_SOURCE_IDS      = set(TERA_SOURCE_IDS + DISK_SOURCE_IDS)
 
+# Tracks sent messages to converter bots so replies can be matched back.
+# key: sent_message_id (int), value: {"media": ..., "caption": str, "dest": str, "label": str, "ts": float}
+# Entries are auto-expired after PENDING_TTL_SECONDS to prevent memory leak on high volume.
+PENDING_TTL_SECONDS = 300  # 5 minutes — converter should reply well within this
+pending_posts: dict[int, dict] = {}
+
 log.info("Tera sources  : %s", TERA_SOURCE_IDS)
 log.info("Disk sources  : %s", DISK_SOURCE_IDS)
 log.info("Tera converter: @%s → dest @%s", TERA_CONVERTER_BOT, TERA_DESTINATION)
@@ -182,11 +188,29 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
         # Phase 2.2 — Keyword-source alignment
         if chat_id in TERA_SOURCE_IDS and "tera" in caption:
             log.info("Tera match from %s — forwarding to @%s", chat_id, TERA_CONVERTER_BOT)
-            await safe_send(ub, TERA_CONVERTER_BOT, file=msg.media, message=msg.message or "")
+            sent = await safe_send(ub, TERA_CONVERTER_BOT, file=msg.media, message=msg.message or "")
+            if sent:
+                pending_posts[sent.id] = {
+                    "media": msg.media,
+                    "caption": msg.message or "",
+                    "dest": TERA_DESTINATION,
+                    "label": "Tera",
+                    "ts": asyncio.get_event_loop().time(),
+                }
+                log.info("Tera: tracked sent msg_id=%d (pending=%d)", sent.id, len(pending_posts))
 
         elif chat_id in DISK_SOURCE_IDS and "disk" in caption:
             log.info("Disk match from %s — forwarding to @%s", chat_id, DISK_CONVERTER_BOT)
-            await safe_send(ub, DISK_CONVERTER_BOT, file=msg.media, message=msg.message or "")
+            sent = await safe_send(ub, DISK_CONVERTER_BOT, file=msg.media, message=msg.message or "")
+            if sent:
+                pending_posts[sent.id] = {
+                    "media": msg.media,
+                    "caption": msg.message or "",
+                    "dest": DISK_DESTINATION,
+                    "label": "Disk",
+                    "ts": asyncio.get_event_loop().time(),
+                }
+                log.info("Disk: tracked sent msg_id=%d (pending=%d)", sent.id, len(pending_posts))
 
     # ── Handler 2: Intercept converter bot replies & relay to destination ─────
     @ub.on(events.NewMessage(from_users=[TERA_CONVERTER_BOT, DISK_CONVERTER_BOT]))
@@ -200,17 +224,30 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
             sender_username = _clean_username(sender.username)
 
         if sender_username == TERA_CONVERTER_BOT:
-            dest = TERA_DESTINATION
-            label = "Tera"
             keyword = "tera"
         elif sender_username == DISK_CONVERTER_BOT:
-            dest = DISK_DESTINATION
-            label = "Disk"
             keyword = "disk"
         else:
             return
 
-        # ── Media check: photo ya video hona chahiye ──────────────────────────
+        # ── Step 1: Match reply to original post via pending_posts ────────────
+        reply_to_id = None
+        if msg.reply_to and getattr(msg.reply_to, "reply_to_msg_id", None):
+            reply_to_id = msg.reply_to.reply_to_msg_id
+
+        if reply_to_id is None or reply_to_id not in pending_posts:
+            log.info(
+                "Converter reply (keyword=%s) skipped — reply_to_id=%s not in pending_posts.",
+                keyword, reply_to_id,
+            )
+            return
+
+        original = pending_posts.pop(reply_to_id)
+        dest  = original["dest"]
+        label = original["label"]
+        log.info("%s: matched converter reply to pending msg_id=%d", label, reply_to_id)
+
+        # ── Step 2: Media check ───────────────────────────────────────────────
         has_photo = bool(msg.photo)
         has_video = (
             msg.document is not None
@@ -224,12 +261,11 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
             log.info("%s converter reply skipped — no media.", label)
             return
 
-        # ── Link check: keyword must appear inside a URL in the message ───────
+        # ── Step 3: Keyword must be inside a URL ─────────────────────────────
         import re as _re
-        all_urls = []
         raw_text = (msg.message or "").lower()
+        all_urls = []
 
-        # 1. Text entities (MessageEntityUrl → raw text, MessageEntityTextUrl → .url attr)
         if msg.entities:
             for ent in msg.entities:
                 url_attr = getattr(ent, "url", None)
@@ -240,7 +276,6 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
                     if chunk.startswith("http"):
                         all_urls.append(chunk)
 
-        # 2. Inline keyboard button URLs
         if msg.reply_markup:
             for row in getattr(msg.reply_markup, "rows", []):
                 for btn in getattr(row, "buttons", []):
@@ -248,30 +283,44 @@ def attach_userbot_handlers(ub: TelegramClient) -> None:
                     if btn_url:
                         all_urls.append(btn_url.lower())
 
-        # 3. Regex fallback — plain text me bhi URLs scan karo (entities na ho tab bhi)
-        regex_urls = _re.findall(r"https?://\S+", raw_text)
-        all_urls.extend(regex_urls)
-
-        # Deduplicate
+        # Regex fallback — plain text URLs (bold Unicode text me entities nahi banti)
+        all_urls.extend(_re.findall(r"https?://\S+", raw_text))
         all_urls = list(set(all_urls))
 
-        keyword_found = any(keyword in url for url in all_urls)
-        if not keyword_found:
+        if not any(keyword in url for url in all_urls):
             log.info(
-                "%s converter reply skipped — keyword '%s' not found in any link. URLs found: %s",
+                "%s reply skipped — keyword '%s' not in any URL. URLs: %s",
                 label, keyword, all_urls,
             )
             return
 
-        log.info("%s converter replied — keyword '%s' found in link, sending to @%s", label, keyword, dest)
+        log.info("%s keyword '%s' found — sending to @%s", label, keyword, dest)
 
-        # Phase 3 — Fresh send (no forward tag) to destination
+        # ── Step 4: Forward converter reply AS-IS (media + caption from converter)
         await safe_send(
             ub,
             dest,
             file=msg.media,
             message=msg.message or "",
         )
+
+
+async def pending_cleanup_task() -> None:
+    """
+    Background task: remove stale pending_posts entries older than PENDING_TTL_SECONDS.
+    Runs every 60 seconds. Prevents memory leak on high-volume source channels.
+    """
+    while True:
+        await asyncio.sleep(60)
+        now = asyncio.get_event_loop().time()
+        stale = [
+            mid for mid, data in list(pending_posts.items())
+            if now - data.get("ts", 0) > PENDING_TTL_SECONDS
+        ]
+        if stale:
+            for mid in stale:
+                pending_posts.pop(mid, None)
+            log.info("Cleanup: removed %d stale pending_posts entries (remaining=%d)", len(stale), len(pending_posts))
 
 
 async def start_userbot(session_string: str) -> bool:
@@ -312,28 +361,30 @@ async def safe_send(
     target: str,
     message: str = "",
     file=None,
-) -> None:
+):
     """
     Send a message (with optional media) to `target`.
     Handles FloodWaitError gracefully.
+    Returns the sent Message object, or None on failure.
     """
     for attempt in range(3):
         try:
             if file:
-                await client.send_message(target, message, file=file)
+                return await client.send_message(target, message, file=file)
             else:
                 if message.strip():
-                    await client.send_message(target, message)
-            return
+                    return await client.send_message(target, message)
+            return None
         except errors.FloodWaitError as e:
             log.warning("FloodWait: sleeping %ds (attempt %d/3)", e.seconds, attempt + 1)
             await asyncio.sleep(e.seconds + 2)
         except errors.UserIsBlockedError:
             log.error("Bot is blocked by %s — skipping.", target)
-            return
+            return None
         except Exception as exc:
             log.exception("safe_send failed for %s: %s", target, exc)
-            return
+            return None
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -568,9 +619,8 @@ async def main():
     # ── Step 4: Run both clients concurrently ────────────────────────────────
     log.info("Running. Press Ctrl+C to stop.")
 
-    clients_to_run = [bot_client]
-    if userbot and userbot_active:
-        clients_to_run.append(userbot)
+    # Background task: clean up stale pending_posts every 60s
+    asyncio.create_task(pending_cleanup_task())
 
     # Use run_until_disconnected on the bot (primary).
     # Userbot runs in background — its handlers fire independently.
