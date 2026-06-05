@@ -500,7 +500,7 @@ async def main():
     register_bot_handlers()
 
     # ── Step 3: Check Supabase for an existing session ───────────────────────
-    saved_session = await sb_get_session()
+    saved_session = os.environ.get("STRING_SESSION", "").strip() or await sb_get_session()
 
     if saved_session:
         log.info("Found saved session in Supabase — starting userbot...")
